@@ -6,10 +6,10 @@ import numpy as np
 from scipy.stats import norm, poisson
 
 
-with open("/mnt/data/projections.json") as f:
+with open("projections.json") as f:
     projections = json.load(f)
 
-with open("/mnt/data/prop_trends.json") as f:
+with open("prop_trends.json") as f:
     trends = json.load(f)
 
 
