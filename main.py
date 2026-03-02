@@ -3,6 +3,8 @@ import time
 import threading
 import fade
 from algo import build
+import subprocess
+import sys
 
 
 logo = """
@@ -41,6 +43,8 @@ def load(msg="", sec=2):
 
 
 def main():
+
+    subprocess.run([sys.executable, "fetch.py"])
 
     while True:
 
@@ -141,5 +145,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()1
-    
+    main()
