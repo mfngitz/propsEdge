@@ -44,7 +44,7 @@ def load(msg="", sec=2):
 
 def main():
 
-    subprocess.run([sys.executable, "fetch.py"])
+    # subprocess.run([sys.executable, "fetch.py"])
 
     while True:
 
@@ -56,7 +56,7 @@ def main():
 
         print("\n1. View Props By Game")
         print("2. Exit")
-        print("\nPress Enter to Reload\n")
+        print("\nEnter to Reload\n")
 
         ch = input("Select: ")
 
@@ -140,7 +140,7 @@ def main():
                         f"Kelly {r['kelly']}"
                     )
 
-                input("\nEnter to Reload:")
+                input("\nPress Enter to Reload:")
                 break
 
 
