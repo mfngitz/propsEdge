@@ -1,255 +1,236 @@
 import json
 import math
-import statistics
-from collections import defaultdict
+import os
+from datetime import datetime, UTC
 from scipy.stats import norm, poisson
 
 
-with open("projections.json") as f:
-    projections = json.load(f)
-
-with open("prop_trends.json") as f:
-    trends = json.load(f)
+BASE = os.path.dirname(__file__)
+JDIR = os.path.join(BASE, "jsons")
 
 
-ALLOWED_PROPS = {
-    "points",
-    "pointsRebounds",
-    "pointsAssists",
-    "reboundsAssists",
-    "pointsReboundsAssists",
-}
+def build():
 
+    with open(os.path.join(JDIR, "projections.json")) as f:
+        proj = json.load(f)
 
-proj_map = {p["id"]: p for p in projections}
-trend_map = {p["id"]: p for p in trends}
+    with open(os.path.join(JDIR, "prop_trends.json")) as f:
+        trnd = json.load(f)
 
+    with open(os.path.join(JDIR, "schedule.json")) as f:
+        sch = json.load(f)
 
-class MathTools:
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
 
-    def american_to_prob(self, odds):
-        if odds > 0:
-            return 100 / (odds + 100)
-        return -odds / (-odds + 100)
+    team = set()
+    games = []
 
-    def remove_vig(self, over_odds, under_odds):
-        p_over = self.american_to_prob(over_odds)
-        p_under = self.american_to_prob(under_odds)
-        total = p_over + p_under
-        return p_over / total
+    # collect only today's matchups
+    for g in sch:
+        if g.get("date") != today:
+            continue
 
-    def expected_value(self, prob, odds):
-        if odds > 0:
-            return prob * (odds / 100) - (1 - prob)
-        return prob - (1 - prob) * (100 / -odds)
+        h = g.get("home")
+        a = g.get("away")
 
-    def kelly(self, prob, odds):
-        if odds > 0:
-            b = odds / 100
-        else:
-            b = 100 / -odds
-        f = (prob * (b + 1) - 1) / b
-        return max(f, 0)
+        if h and a:
+            team.add(h)
+            team.add(a)
+            games.append((h, a))
 
-    def poisson_over(self, mean, line):
-        k = math.floor(line)
-        return 1 - poisson.cdf(k, mean)
+    allowed = {
+        "points",
+        "rebounds",
+        "assists",
+        "pointsRebounds",
+        "pointsAssists",
+        "reboundsAssists",
+        "pointsReboundsAssists",
+    }
 
-    def normal_over(self, mean, line, std):
-        z = (mean - line) / std
-        return norm.cdf(z)
+    pmap = {p["id"]: p for p in proj}
+    tmap = {p["id"]: p for p in trnd}
 
-    def logistic(self, x):
+    def num(x, d=0):
+        return x if isinstance(x, (int, float)) else d
+
+    def pct(x):
+        return num(x, 50) / 100
+
+    # simple bayesian smoothing so small samples don't swing too hard
+    def bay(p, n=20, m=0.5, w=15):
+        s = p * n
+        a = s + m * w
+        b = (n - s) + (1 - m) * w
+        return a / (a + b)
+
+    # blend poisson + normal depending on dispersion
+    def mix(mu, ln, sd):
+        p1 = 1 - poisson.cdf(math.floor(ln), mu)
+        sd = max(sd, 0.01)
+        z = (mu - ln) / sd
+        p2 = norm.cdf(z)
+        d = sd / max(mu, 1)
+        w = min(max(d, 0), 1)
+        return w * p2 + (1 - w) * p1
+
+    def adj(p, rk):
+        s = (rk - 15) / 15
+        return max(min(p * (1 + s * 0.12), 0.99), 0.01)
+
+    def logi(x):
         return 1 / (1 + math.exp(-x))
 
-
-math_tools = MathTools()
-
-
-class ModelEngine:
-
-    def estimate_std(self, mean, l10, l20):
-        vol = abs(l10 - l20) / 100
-        base = max(1.5, mean * 0.16)
-        return base * (1 + vol)
-
-    def projection_elasticity(self, mean, line):
-        if line == 0:
+    def ent(p):
+        if p <= 0 or p >= 1:
             return 0
-        return (mean - line) / line
+        return -p * math.log(p) - (1 - p) * math.log(1 - p)
 
-    def mean_reversion(self, rate, l10):
-        return 1 - abs(rate - l10) * 0.5
+    def am2p(o):
+        o = num(o)
+        if o > 0:
+            return 100 / (o + 100)
+        return -o / (-o + 100)
 
-    def regime_adjustment(self, l5, l10):
-        delta = l5 - l10
-        return 1 + delta * 0.4
+    def nov(o1, o2):
+        p1 = am2p(o1)
+        p2 = am2p(o2)
+        t = p1 + p2
+        return p1 / t if t else 0.5
 
-    def volatility_penalty(self, l10, l20):
-        return 1 - abs(l10 - l20) * 0.4
+    def evl(p, o):
+        o = num(o)
+        if o > 0:
+            return p * (o / 100) - (1 - p)
+        return p - (1 - p) * (100 / -o)
 
-    def consistency(self, rate, l10, l20):
-        return 1 - (abs(rate - l10) + abs(l10 - l20)) * 0.3
+    def kel(p, o):
+        o = num(o)
+        b = o / 100 if o > 0 else 100 / -o
+        f = (p * (b + 1) - 1) / b if b else 0
+        return max(f, 0)
 
+    def stdv(mu, l1, l2):
+        v = abs(l1 - l2) / 100
+        b = max(1.5, mu * 0.16)
+        return b * (1 + v)
 
-model_engine = ModelEngine()
+    best = {}
 
+    for pid, pr in pmap.items():
 
-class AdaptiveBlend:
-
-    def blend(self, model_p, trend_p, market_p):
-        disagreement = abs(model_p - market_p)
-
-        model_weight = 0.35 + disagreement * 0.6
-        trend_weight = 0.35
-        market_weight = 1 - model_weight - trend_weight
-
-        raw = (
-            model_weight * model_p +
-            trend_weight * trend_p +
-            market_weight * market_p
-        )
-
-        return max(min(raw, 0.99), 0.01)
-
-    def shrink_to_market(self, final_p, market_p, confidence):
-        shrink = (1 - confidence) * 0.5
-        return final_p * (1 - shrink) + market_p * shrink
-
-    def calibration(self, p):
-        return math_tools.logistic((p - 0.5) * 6)
-
-
-adaptive = AdaptiveBlend()
-
-
-player_best = {}
-raw_scores = []
-
-for pid, proj in proj_map.items():
-
-    if pid not in trend_map:
-        continue
-
-    name = proj["name"]
-    team = proj["team"]
-
-    player_trend = trend_map[pid]
-    player_proj = proj["projections"]
-
-    best = None
-
-    for prop, data in player_trend.items():
-
-        if prop not in ALLOWED_PROPS:
+        if pid not in tmap:
             continue
 
-        if prop not in player_proj:
+        tm = pr.get("team")
+        if tm not in team:
             continue
 
-        line = data.get("line")
-        over_odds = data.get("over")
-        under_odds = data.get("under")
+        nm = pr.get("name")
+        pj = pr.get("projections", {})
+        tr = tmap[pid]
 
-        if not line or not over_odds or not under_odds:
-            continue
+        top = None
 
-        mean = player_proj[prop]
+        for prop, dt in tr.items():
 
-        market_p = math_tools.remove_vig(over_odds, under_odds)
+            if prop not in allowed:
+                continue
+            if prop not in pj:
+                continue
+            if not isinstance(dt, dict):
+                continue
 
-        rate = data.get("rate", 50) / 100
-        l5 = data.get("l5Rate", 50) / 100
-        l10 = data.get("l10Rate", 50) / 100
-        l20 = data.get("l20Rate", 50) / 100
-        opp = data.get("oppDef", 15)
+            ln = num(dt.get("line"))
+            ov = dt.get("over")
+            un = dt.get("under")
 
-        std = model_engine.estimate_std(
-            mean,
-            data.get("l10Rate", 50),
-            data.get("l20Rate", 50),
-        )
+            if ln is None or ov is None or un is None:
+                continue
 
-        if prop == "points" and mean < 25:
-            model_p = math_tools.poisson_over(mean, line)
-        else:
-            model_p = math_tools.normal_over(mean, line, std)
+            mu = num(pj.get(prop))
+            mp = nov(ov, un)
 
-        elasticity = model_engine.projection_elasticity(mean, line)
-        trend_p = (
-            0.45 * rate +
-            0.25 * l5 +
-            0.2 * l10 +
-            0.1 * l20
-        )
+            rt = bay(pct(dt.get("rate")), 20)
+            l5 = bay(pct(dt.get("l5Rate")), 5)
+            l10 = bay(pct(dt.get("l10Rate")), 10)
+            l20 = bay(pct(dt.get("l20Rate")), 20)
 
-        trend_p *= (1 + elasticity)
-        trend_p *= model_engine.regime_adjustment(l5, l10)
+            sd = stdv(mu, num(dt.get("l10Rate"), 50), num(dt.get("l20Rate"), 50))
 
-        blended = adaptive.blend(model_p, trend_p, market_p)
+            mp1 = mix(mu, ln, sd)
+            mp1 = adj(mp1, num(dt.get("oppDef"), 15))
 
-        confidence = 1 - abs(model_p - trend_p)
+            el = (mu - ln) / ln if ln else 0
+            trp = (0.45 * rt + 0.25 * l5 + 0.2 * l10 + 0.1 * l20)
+            trp *= (1 + el)
+            trp = adj(trp, num(dt.get("oppDef"), 15))
 
-        blended = adaptive.shrink_to_market(blended, market_p, confidence)
+            dis = abs(mp1 - mp)
+            mw = 0.35 + dis * 0.6
+            tw = 0.35
+            bw = 1 - mw - tw
 
-        calibrated = adaptive.calibration(blended)
+            # weighted blend of model, trends, and market
+            bl = mw * mp1 + tw * trp + bw * mp
+            bl = max(min(bl, 0.99), 0.01)
 
-        ev = math_tools.expected_value(calibrated, over_odds)
-        kelly = math_tools.kelly(calibrated, over_odds)
+            cf = 1 - abs(mp1 - trp)
+            bl = bl * cf + mp * (1 - cf)
 
-        score = (
-            ev *
-            confidence *
-            model_engine.volatility_penalty(l10, l20) *
-            model_engine.mean_reversion(rate, l10) *
-            model_engine.consistency(rate, l10, l20)
-        )
+            cal = logi((bl - 0.5) * 6)
 
-        candidate = {
-            "player": name,
-            "team": team,
-            "prop": prop,
-            "line": line,
-            "projection": round(mean, 2),
-            "prob": round(calibrated, 3),
-            "ev": round(ev, 3),
-            "kelly": round(kelly, 3),
-            "score": score,
-        }
+            mmt = (l5 - l20)
+            cal *= (1 + mmt * 0.15)
+            cal = max(min(cal, 0.99), 0.01)
 
-        raw_scores.append(score)
+            edg = mp1 - mp
+            cal *= (1 + edg * 0.4)
+            cal = max(min(cal, 0.99), 0.01)
 
-        if best is None or candidate["score"] > best["score"]:
-            best = candidate
+            # evaluate both sides and take whichever has better EV
+            p_over = cal
+            p_under = 1 - cal
 
-    if best:
-        player_best[name] = best
+            e_over = evl(p_over, ov)
+            e_under = evl(p_under, un)
 
+            if e_over >= e_under:
+                side = "over"
+                final_p = p_over
+                final_ev = e_over
+                final_k = kel(p_over, ov)
+            else:
+                side = "under"
+                final_p = p_under
+                final_ev = e_under
+                final_k = kel(p_under, un)
 
-score_values = list(raw_scores)
-mean_score = statistics.mean(score_values)
-std_score = statistics.stdev(score_values) if len(score_values) > 1 else 1
+            var = 1 - abs(l10 - l20) * 0.4
+            rev = 1 - abs(rt - l10) * 0.5
+            con = 1 - (abs(rt - l10) + abs(l10 - l20)) * 0.3
 
+            sc = final_ev * cf * var * rev * con
+            sc *= (1 + abs(mu - ln) / ln if ln else 1)
+            sc *= 1 - (ent(final_p) / 0.69)
 
-ranked = []
+            row = {
+                "player": nm,
+                "team": tm,
+                "prop": prop,
+                "side": side,
+                "line": ln,
+                "projection": round(mu, 2),
+                "prob": round(final_p, 3),
+                "ev": round(final_ev, 3),
+                "kelly": round(final_k, 3),
+                "score": sc,
+            }
 
-for p in player_best.values():
-    normalized = (p["score"] - mean_score) / std_score
-    p["norm_score"] = normalized
-    ranked.append(p)
+            if top is None or row["score"] > top["score"]:
+                top = row
 
+        if top:
+            best.setdefault(tm, []).append(top)
 
-ranked.sort(key=lambda x: x["norm_score"], reverse=True)
-
-
-print("\nTop 3 Props\n")
-
-for i, r in enumerate(ranked[:3], 1):
-    print(
-        f"{i}. {r['player']} ({r['team']}) "
-        f"{r['prop']} over {r['line']} | "
-        f"Proj: {r['projection']} | "
-        f"Prob: {r['prob']} | "
-        f"EV: {round(r['ev'],3)} | "
-        f"Kelly: {r['kelly']}"
-    )
+    return games, allowed, best
