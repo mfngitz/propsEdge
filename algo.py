@@ -25,7 +25,6 @@ def build():
     team = set()
     games = []
 
-    # collect only today's matchups
     for g in sch:
         if g.get("date") != today:
             continue
@@ -57,14 +56,12 @@ def build():
     def pct(x):
         return num(x, 50) / 100
 
-    # simple bayesian smoothing so small samples don't swing too hard
     def bay(p, n=20, m=0.5, w=15):
         s = p * n
         a = s + m * w
         b = (n - s) + (1 - m) * w
         return a / (a + b)
 
-    # blend poisson + normal depending on dispersion
     def mix(mu, ln, sd):
         p1 = 1 - poisson.cdf(math.floor(ln), mu)
         sd = max(sd, 0.01)
@@ -171,7 +168,6 @@ def build():
             tw = 0.35
             bw = 1 - mw - tw
 
-            # weighted blend of model, trends, and market
             bl = mw * mp1 + tw * trp + bw * mp
             bl = max(min(bl, 0.99), 0.01)
 
@@ -188,7 +184,6 @@ def build():
             cal *= (1 + edg * 0.4)
             cal = max(min(cal, 0.99), 0.01)
 
-            # evaluate both sides and take whichever has better EV
             p_over = cal
             p_under = 1 - cal
 
